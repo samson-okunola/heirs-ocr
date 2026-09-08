@@ -1,3 +1,4 @@
+import Link from "next/link";
 import {
   ScanText,
   FileText,
@@ -10,7 +11,6 @@ import {
   FileSearch,
   Check,
 } from "lucide-react";
-import Link from "next/link";
 
 import { Button, Badge } from "@heirs/ui";
 
@@ -125,7 +125,7 @@ export default function Page() {
             <Button
               size="lg"
               render={
-                <Link href="/login">
+                <Link href="/register">
                   Get started <ArrowRight className="size-4" />
                 </Link>
               }

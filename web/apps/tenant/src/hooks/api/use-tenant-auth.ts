@@ -9,6 +9,19 @@ export interface TenantLoginPayload {
   password: string;
 }
 
+export interface TenantRegisterPayload {
+  email: string;
+  password: string;
+  name: string;
+  organizationName: string;
+  planId: string;
+}
+
+export interface TenantVerificationPayload {
+  email: string;
+  otp: string;
+}
+
 /**
  * A password POST either signs the user in or stops at the second factor. The
  * union is deliberate: nothing may treat the MFA branch as a session, because on
@@ -37,6 +50,22 @@ export function useTenantMe() {
     },
     retry: false,
     staleTime: 60_000,
+  });
+}
+
+export function useTenantRegister() {
+  return useMutation({
+    mutationKey: ["tenant-auth", "register"],
+    mutationFn: (payload: TenantRegisterPayload) =>
+      http.post<TenantLoginResult>("/api/tenant/register", payload).then(unwrap),
+  });
+}
+
+export function useTenantVerification() {
+  return useMutation({
+    mutationKey: ["tenant-auth", "verification"],
+    mutationFn: (payload: TenantVerificationPayload) =>
+      http.post<TenantLoginResult>("/api/tenant/verification", payload).then(unwrap),
   });
 }
 

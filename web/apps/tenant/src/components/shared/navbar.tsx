@@ -35,7 +35,7 @@ export const Navbar = () => {
         </div>
         <div className="hidden items-center gap-2 md:flex">
           <Button variant="ghost" size="sm" render={<Link href="/login">Sign In</Link>}></Button>
-          <Button size="sm" render={<Link href="/login">Get started</Link>}></Button>
+          <Button size="sm" render={<Link href="/register">Get started</Link>}></Button>
         </div>
         <button className="md:hidden" onClick={() => setOpen((v) => !v)} aria-label="Toggle menu">
           {open ? <X className="size-5" /> : <Menu className="size-5" />}

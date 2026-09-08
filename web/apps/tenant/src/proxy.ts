@@ -14,7 +14,7 @@ const LOGIN = "/login";
 const DASHBOARD = "/ocr";
 
 /** Routes that are always public — no session required. */
-const PUBLIC_PATHS = new Set(["/", "/login", "/api-reference", "/sdks", "/changelog"]);
+const PUBLIC_PATHS = new Set(["/", "/login", "/register", "/verification", "/api-reference", "/sdks", "/changelog"]);
 
 export function proxy(request: NextRequest) {
   const { pathname, search } = request.nextUrl;

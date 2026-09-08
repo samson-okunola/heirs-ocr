@@ -2,17 +2,17 @@
 
 import { useRouter, useSearchParams } from "next/navigation";
 import { zodResolver } from "@hookform/resolvers/zod";
+import { Suspense, useState } from "react";
 import { useForm } from "react-hook-form";
 import { Loader } from "lucide-react";
-import { Suspense, useState } from "react";
 import { toast } from "sonner";
 import { z } from "zod";
 
 import { useTenantLogin, useTenantLoginMfa } from "@/hooks/api/use-tenant-auth";
 import { getErrorMessage, isMfaChallenge } from "@heirs/api-client";
 import { MfaChallengeForm } from "@heirs/ui";
-import { Field } from "@heirs/ui";
 import { Button } from "@heirs/ui";
+import { Field } from "@heirs/ui";
 import { Input } from "@heirs/ui";
 
 const schema = z.object({
