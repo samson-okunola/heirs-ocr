@@ -1,12 +1,20 @@
 import type { NextRequest } from "next/server";
 
+import type { Plan } from "@/types/plan";
+import { requireEnv } from "./env";
+
 /**
  * Server-side config for reaching the OCR backend from the Next proxy routes.
  * Read only in route handlers (never shipped to the browser).
  */
 
-/** Base URL of the OCR API. Defaults to the local dev server. */
-export const ocrApiUrl = (): string => process.env.OCR_API_URL ?? "http://localhost:8080";
+/**
+ * Base URL of the OCR API, including the scheme — `fetch` cannot parse a bare
+ * `host:port`. Required rather than defaulted: a silent fallback to localhost in a
+ * deployed environment fails as a connection refused far from its cause, and
+ * `src/instrumentation.ts` has already refused to start without it.
+ */
+export const ocrApiUrl = (): string => requireEnv("OCR_API_URL");
 
 /**
  * The host to print in public documentation — what a customer types into their own
@@ -72,3 +80,28 @@ export const relayUpstream = async (res: Response): Promise<Response> =>
     status: res.status,
     headers: { "content-type": res.headers.get("content-type") ?? "application/json" },
   });
+
+/**
+ * The self-serve plan catalog, read on the server for the public pricing section.
+ *
+ * Goes straight to the backend rather than through this app's own `/api/tenant`
+ * proxy: that proxy exists so the *browser* can talk same-origin, and a server
+ * component calling its own HTTP route would be a pointless extra hop.
+ *
+ * Returns `[]` rather than throwing when the API is unreachable. A marketing page
+ * must render — but it must not render invented prices, so the caller shows a
+ * fallback that says nothing about cost instead of stale numbers.
+ */
+export const fetchPublicPlans = async (): Promise<Plan[]> => {
+  try {
+    const res = await fetch(`${ocrApiUrl()}/tenant/api/plans?pageSize=100`, {
+      // Plans change when an operator edits them, not per visitor.
+      next: { revalidate: 300 },
+    });
+    if (!res.ok) return [];
+    const body = (await res.json()) as { items?: Plan[] };
+    return body.items ?? [];
+  } catch {
+    return [];
+  }
+};

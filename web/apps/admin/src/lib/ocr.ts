@@ -1,12 +1,19 @@
 import type { NextRequest } from "next/server";
 
+import { requireEnv } from "./env";
+
 /**
  * Server-side config for reaching the OCR backend from the Next proxy routes.
  * Read only in route handlers (never shipped to the browser).
  */
 
-/** Base URL of the OCR API. Defaults to the local dev server. */
-export const ocrApiUrl = (): string => process.env.OCR_API_URL ?? "http://localhost:8080";
+/**
+ * Base URL of the OCR API, including the scheme — `fetch` cannot parse a bare
+ * `host:port`. Required rather than defaulted: a silent fallback to localhost in a
+ * deployed environment fails as a connection refused far from its cause, and
+ * `src/instrumentation.ts` has already refused to start without it.
+ */
+export const ocrApiUrl = (): string => requireEnv("OCR_API_URL");
 
 /** The tenant-portal session cookie (mirrors the backend's `tenant_session`). */
 export const TENANT_SESSION_COOKIE = "tenant_session";

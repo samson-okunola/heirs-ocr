@@ -161,9 +161,25 @@ const schema = z
      * must be the address a recipient can actually reach — not an internal hostname.
      */
     APP_BASE_URL: z.string().default("http://localhost:8080"),
+    /**
+     * Public base URL of *this* API, quoted to new tenants in their welcome email as
+     * the host they should point an SDK at. Distinct from `APP_BASE_URL`, which is
+     * the console a person opens in a browser.
+     */
+    API_BASE_URL: z.string().default("http://localhost:8080"),
     /** Landing pages linked from the footer of every email. */
     DOCS_URL: z.string().default("https://docs.heirstechnologies.com"),
     SUPPORT_EMAIL: z.string().default("support@heirstechnologies.com"),
+    /**
+     * Whether anyone may create an organisation from the public register page.
+     *
+     * On by default — the tenant portal ships a `/register` screen and a signup that
+     * silently 404s is worse than one that is explicitly closed. Turn it off for a
+     * deployment where every org is provisioned by an operator through the admin
+     * console; `POST /tenant/api/register` then answers 403 and the console hides the
+     * link.
+     */
+    SELF_SIGNUP_ENABLED: z.enum(["true", "false"]).default("true"),
   })
   .refine((data) => data.AZURE_OPENAI_ENABLED !== "true" || !!data.AZURE_OPENAI_API_KEY, {
     message: "AZURE_OPENAI_API_KEY is required when AZURE_OPENAI_ENABLED is true",

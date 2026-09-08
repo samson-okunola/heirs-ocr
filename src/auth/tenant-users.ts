@@ -64,13 +64,19 @@ const toView = (record: TenantUserRecord): TenantUser => {
  */
 const hashPassword = (plain: string): Promise<string> => argonHash(plain);
 
+/**
+ * Exactly one of `password` / `passwordHash` must be supplied.
+ *
+ * The hash form exists for self-serve signup: it hashes at register time so the
+ * plaintext never reaches the pending-signup store in Redis (src/auth/signup.ts),
+ * and by the time the account is really created there is nothing left to hash.
+ */
 export type CreateTenantUserInput = {
   tenantId: string;
   email: string;
   name: string;
   role: TenantRole;
-  password: string;
-};
+} & ({ password: string; passwordHash?: undefined } | { passwordHash: string; password?: undefined });
 
 /**
  * Creates a tenant user under an org. Rejects a duplicate email (the login key is
@@ -88,7 +94,7 @@ export const createTenantUser = async (input: CreateTenantUserInput, actor = "un
     email,
     name: input.name,
     role: input.role,
-    passwordHash: await hashPassword(input.password),
+    passwordHash: input.passwordHash ?? (await hashPassword(input.password!)),
     createdAt: now,
     updatedAt: now,
   };

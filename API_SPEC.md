@@ -390,6 +390,35 @@ another account's factor (`DELETE /admin/api/admins/:id/mfa`, `DELETE /tenant/ap
 the latter scoped to the caller's own org). Both are audited: the action lowers someone else's
 account security, so the request should be verified out of band first.
 
+### Self-service sign-up
+
+Anyone may create an organisation from the portal's register page, unless the deployment sets
+`SELF_SIGNUP_ENABLED=false` (in which case `POST /tenant/api/register` answers `403 FORBIDDEN`
+and orgs are provisioned by an operator through the admin API instead).
+
+The flow is deliberately two-step, and **nothing is written to Postgres until the second step**:
+
+1. `POST /api/register` validates the password against the same policy as every other
+   credential, checks the chosen plan exists and is not `hidden`, and holds the submitted
+   details in Redis for 15 minutes under a six-digit code emailed to the address. Both the
+   password and the code are stored as argon2id hashes, never in the clear.
+2. `POST /api/verification` redeems the code, then creates the org and its first API key, the
+   subscription, and the owner login — in that order, so a partial failure leaves an org an
+   operator can finish rather than an owner locked inside one with no subscription. The
+   response carries the raw API key **once**, and sets the session cookie.
+
+Ordering it this way means an abandoned form leaves nothing behind, and nobody can claim an
+organisation — or a colleague's email address — without proving they can read that mailbox.
+
+Three abuse controls apply. Attempts are counted against the login throttle under a separate
+`signup` scope, so a spray cannot lock anyone out of signing *in*. A code tolerates five wrong
+guesses before the pending sign-up is destroyed, and a wrong guess does not extend its window.
+Re-sends are rate-limited per sign-up so the endpoint cannot be used to mail-bomb an address.
+
+An email that already has an account receives the same `202` and no mail: confirming it would
+turn the endpoint into a membership oracle for any address someone cares to try. The person who
+owns the mailbox learns the account exists by signing in or resetting the password.
+
 ### Sessions
 
 Each account's live sessions are listed on its security page and can be revoked in bulk
@@ -1078,12 +1107,16 @@ unreachable store still ends in a non-zero exit, and both compose files set
 ## Appendix A — Tenant Portal API (`/tenant/api`)
 
 Same-origin JSON API for a tenant's own users (served behind the Next.js portal). All routes
-except login require a **tenant session cookie**; management routes require the `owner` role.
-Every route is scoped to the caller's own tenant org — a tenant can never read or mutate
-another org's keys or users. Errors use a `{ error: { code, message } }` shape.
+except sign-up and login require a **tenant session cookie**; management routes require the
+`owner` role. Every route is scoped to the caller's own tenant org — a tenant can never read or
+mutate another org's keys or users. Errors use a `{ error: { code, message } }` shape.
 
 | Method + path                           | Role   | Purpose                                                                  |
 | --------------------------------------- | ------ | ------------------------------------------------------------------------ |
+| `GET  /api/plans`                       | open   | Self-serve plan catalog for the register form (`hidden` plans excluded). |
+| `POST /api/register`                    | open   | Start a sign-up: holds the details, emails a code. Creates nothing yet.  |
+| `POST /api/verification`                | open   | Redeem the code — creates the org, subscription and owner; signs in.     |
+| `POST /api/verification/resend`         | open   | Re-send the code for a sign-up in flight. Cooldown-limited.              |
 | `POST /api/login`                       | open   | Authenticate. Returns a session, or an MFA challenge. Login-throttled.   |
 | `POST /api/login/mfa`                   | open   | Redeem an MFA challenge for a session. Login-throttled.                  |
 | `POST /api/logout`                      | member | Destroy the session.                                                     |

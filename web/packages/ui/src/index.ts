@@ -1,6 +1,8 @@
 // Public surface of @heirs/ui — presentational primitives shared by both apps.
 export * from "./lib/utils";
+export * from "./lib/currency";
 export * from "./lib/string";
+export * from "./lib/schema-args";
 export * from "./types";
 export * from "./hooks/use-pagination";
 
@@ -37,7 +39,7 @@ export * from "./components/shared/field";
 export * from "./components/shared/mfa-challenge-form";
 export * from "./components/shared/mfa-settings";
 export * from "./components/shared/mfa-setup-dialog";
-export * from "./components/shared/otp-input"
+export * from "./components/shared/otp-input";
 export * from "./components/shared/page-layout";
 export * from "./components/shared/qr-code";
 export * from "./components/shared/pagination";

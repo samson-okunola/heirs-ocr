@@ -1,6 +1,16 @@
 import { defineConfig } from "vitest/config";
+import path from "path";
 
 export default defineConfig({
+  // The pricing helpers under test live in the web workspace and import the shared
+  // money formatter by package name. Only that module is needed, and it depends on
+  // nothing but `Intl` — so it is mapped directly rather than pulling the whole
+  // component library (and its React/Tailwind deps) into a node-environment run.
+  resolve: {
+    alias: {
+      "@heirs/ui": path.resolve(__dirname, "web/packages/ui/src/lib/currency.ts"),
+    },
+  },
   test: {
     environment: "node",
     include: ["test/**/*.test.ts"],

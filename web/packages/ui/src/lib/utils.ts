@@ -16,14 +16,3 @@ export function removeNullOrUndefined<
   );
   return cleaned as Partial<T>;
 }
-
-export function formatCurrency(amount = 0, currency = "NGN", display: "compact" | "full" = "compact") {
-  return new Intl.NumberFormat("en-NG", {
-    currency,
-    currencyDisplay: "narrowSymbol",
-    style: "currency",
-    maximumFractionDigits: 0,
-    minimumFractionDigits: 0,
-    ...(display === "compact" ? { notation: "compact", compactDisplay: "short" } : { notation: "standard" }),
-  }).format(amount);
-}

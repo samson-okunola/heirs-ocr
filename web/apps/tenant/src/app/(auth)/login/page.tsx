@@ -10,10 +10,11 @@ import { z } from "zod";
 
 import { useTenantLogin, useTenantLoginMfa } from "@/hooks/api/use-tenant-auth";
 import { getErrorMessage, isMfaChallenge } from "@heirs/api-client";
-import { MfaChallengeForm } from "@heirs/ui";
+import { Checkbox, MfaChallengeForm } from "@heirs/ui";
 import { Button } from "@heirs/ui";
 import { Field } from "@heirs/ui";
 import { Input } from "@heirs/ui";
+import Link from "next/link";
 
 const schema = z.object({
   email: z.string().min(1, "Email is required").email("Enter a valid email"),
@@ -84,19 +85,36 @@ const LoginForm = () => {
         <Field label="Email" htmlFor="email" error={errors.email?.message}>
           <Input id="email" type="email" autoComplete="email" aria-invalid={!!errors.email} {...register("email")} />
         </Field>
-        <Field label="Password" htmlFor="password" error={errors.password?.message}>
-          <Input
-            id="password"
-            type="password"
-            autoComplete="current-password"
-            aria-invalid={!!errors.password}
-            {...register("password")}
-          />
-        </Field>
+        <div className="space-y-1">
+          <Field label="Password" htmlFor="password" error={errors.password?.message}>
+            <Input
+              id="password"
+              type="password"
+              autoComplete="current-password"
+              aria-invalid={!!errors.password}
+              {...register("password")}
+            />
+          </Field>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-x-1">
+              <Checkbox />
+              <span className="text-sm">Remember me</span>
+            </div>
+            <Link className="text-sm underline" href="/forgot-password">
+              Forgot password?
+            </Link>
+          </div>
+        </div>
         <Button type="submit" className="w-full" disabled={login.isPending}>
           {login.isPending ? <Loader className="animate-spin" /> : "Sign in"}
         </Button>
       </form>
+      <p className="text-sm text-muted-foreground text-center">
+        Don&apos;t have an account?{" "}
+        <Link className="underline text-foreground" href="/register">
+          Register
+        </Link>
+      </p>
     </div>
   );
 };
