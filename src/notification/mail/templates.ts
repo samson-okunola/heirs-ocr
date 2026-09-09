@@ -36,6 +36,7 @@ export const TEMPLATE_NAMES = [
   "team-invite",
   "trial-end",
   "trial-start",
+  "verify-email",
   "webhook-failing",
   "welcome",
 ] as const;

@@ -78,6 +78,19 @@ import {
   revokeByHash,
   type Tenant,
 } from "../../auth/tenants";
+import {
+  MAX_OTP_ATTEMPTS,
+  RESEND_COOLDOWN_SECONDS,
+  SIGNUP_TTL_SECONDS,
+  checkOtp,
+  discardSignup,
+  resendOtp,
+  startSignup,
+} from "../../auth/signup";
+import { appUrl, sendVerifyEmail, sendWelcomeEmail, type SendMailResult } from "../../notification/mail";
+import { provisionTenant } from "../../auth/tenant-provisioning";
+import { getStoredPlan, listPlans } from "../../billing/plan-store";
+import type { SubscriptionPlan } from "../../types/subscription";
 
 /**
  * Tenant portal JSON API, mounted under `/tenant` (paths here start with `/api`).
@@ -89,6 +102,7 @@ import {
  * a tenant can never read or mutate another org's keys or users.
  */
 export const tenantApiRouter = Router();
+export const openApiRouter = Router();
 
 const TENANT_ROLE = z.enum(["owner", "member"]);
 
@@ -145,8 +159,8 @@ const sessionContext = (req: Request): { ip?: string; userAgent?: string } => ({
 
 const loginSchema = z.object({ email: z.string().min(1), password: z.string().min(1) });
 
-tenantApiRouter.post(
-  "/api/login",
+openApiRouter.post(
+  "/login",
   handler(async (req, res) => {
     const parsed = loginSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -215,8 +229,8 @@ tenantApiRouter.post(
 
 const mfaLoginSchema = z.object({ challenge: z.string().min(1), code: z.string().min(1) });
 
-tenantApiRouter.post(
-  "/api/login/mfa",
+openApiRouter.post(
+  "/login/mfa",
   handler(async (req, res) => {
     const parsed = mfaLoginSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -270,6 +284,343 @@ tenantApiRouter.post(
     await clearLoginFailures("tenant", ip, pending.email);
     setSessionCookie(req, res, session.token, session.ttl);
     res.json({ user: publicUser(user), tenantId: user.tenantId, role: user.role });
+  }),
+);
+
+// ── Self-serve signup ─────────────────────────────────────────────────────────
+//
+// Three open routes turn a stranger into an organisation:
+//
+//   GET  /api/plans          the plans a person may pick from
+//   POST /api/register       hold the details, mail a code — nothing is created yet
+//   POST /api/verification   code accepted → org + subscription + owner + session
+//
+// Nothing reaches Postgres until the code comes back (src/auth/signup.ts explains
+// why), so an abandoned form leaves nothing behind and no one can claim an
+// organisation under an address they cannot read.
+
+/** Cheapest tier first, so the free option leads on a signup form. */
+const TIER_ORDER = ["trial", "payg", "starter", "business", "enterprise"];
+
+const selfServePlans = async (): Promise<SubscriptionPlan[]> =>
+  (await listPlans())
+    .filter((plan) => !plan.hidden)
+    .sort((a, b) => TIER_ORDER.indexOf(a.tier) - TIER_ORDER.indexOf(b.tier));
+
+/**
+ * The plan catalog as a signup form needs it: open, because it is read *before*
+ * anyone has an account. Only `hidden: false` plans appear — bespoke enterprise
+ * deals are assigned by an operator, never self-selected.
+ */
+openApiRouter.get(
+  "/plans",
+  handler(async (req, res) => {
+    res.json(paginate(await selfServePlans(), pageParams(req.query)));
+  }),
+);
+
+const registerSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(1),
+  name: z.string().min(1).max(120),
+  organizationName: z.string().min(1).max(120),
+  planId: z.string().min(1),
+});
+
+/** Minutes, for the copy in the verification email. */
+const SIGNUP_TTL_MINUTES = Math.round(SIGNUP_TTL_SECONDS / 60);
+
+/** Formatted for a reader, not a parser — the mail layer interpolates values verbatim. */
+const formatInstant = (date: Date): string =>
+  new Intl.DateTimeFormat("en-NG", { dateStyle: "medium", timeStyle: "short", timeZone: "Africa/Lagos" }).format(date);
+
+/** First name for a greeting; the form asks for a full name. */
+const firstNameOf = (name: string): string => name.trim().split(/\s+/)[0] || name;
+
+/**
+ * A send that was attempted and failed (as opposed to one skipped because mail is
+ * switched off) leaves the user waiting for a code that will never arrive, so the
+ * route answers 503 and invites a retry rather than a cheerful 202.
+ */
+const undelivered = (result: SendMailResult): boolean => !result.delivered && !result.skipped;
+
+/**
+ * In a deployment with no mailer configured there is no way to finish a signup at
+ * all, which makes local development impossible. Log the code instead — but only
+ * outside production, where a code in the log stream would be a real credential leak.
+ */
+const logOtpForDevelopment = (email: string, otp: string): void => {
+  if (env.NODE_ENV === "production") return;
+  logger.warn("signup.otp.logged", { email, otp, reason: "MAIL_ENABLED is false" });
+};
+
+openApiRouter.post(
+  "/register",
+  handler(async (req, res) => {
+    if (env.SELF_SIGNUP_ENABLED !== "true") {
+      sendError(res, 403, "FORBIDDEN", "Self-service signup is closed. Contact us to have an account created.");
+      return;
+    }
+
+    const parsed = registerSchema.safeParse(req.body);
+    if (!parsed.success) {
+      sendError(res, 400, "INVALID_ARGS", parsed.error.issues[0]?.message ?? "Invalid registration");
+      return;
+    }
+
+    const ip = req.ip ?? "unknown";
+    const { email, name, organizationName, planId } = parsed.data;
+
+    // The signup buckets are scoped away from `tenant`, so a spray here can't lock
+    // anyone out of signing in. Every attempt counts, not just failures: this endpoint
+    // sends mail to an address the caller names, and that is worth capping outright.
+    if (!(await loginAllowed("signup", ip, email))) {
+      logger.warn("signup.throttled", { email, ip });
+      sendError(res, 429, "RATE_LIMITED", "Too many attempts. Try again later.");
+      return;
+    }
+    await recordLoginFailure("signup", ip, email);
+
+    try {
+      await assertPasswordPolicy(parsed.data.password);
+    } catch (err) {
+      sendError(res, 400, "INVALID_ARGS", err instanceof Error ? err.message : "Password does not meet policy");
+      return;
+    }
+
+    // Checked here so a bad plan id is a form error rather than a failure 15 minutes
+    // later, at the point where the code is redeemed. Re-checked there too, since the
+    // catalog can change in between.
+    const plan = await getStoredPlan(planId);
+    if (!plan || plan.hidden) {
+      sendError(res, 400, "INVALID_ARGS", "Choose one of the available plans.");
+      return;
+    }
+
+    // An address that already has an account gets the same 202 and no email. Saying
+    // "that email is taken" would turn this endpoint into a membership oracle for
+    // every address someone cares to try; the person who owns the mailbox is the one
+    // who is allowed to know, and they can find out by signing in or resetting.
+    const taken = await getTenantUserByEmail(email);
+    if (taken) {
+      logger.info("signup.duplicate_email", { email, ip });
+      res.status(202).json({ pending: true, email, expiresInMinutes: SIGNUP_TTL_MINUTES });
+      return;
+    }
+
+    const { otp, expiresAt } = await startSignup({ ...parsed.data, email });
+
+    const sent = await sendVerifyEmail(
+      { to: email, firstName: firstNameOf(name), tenantName: organizationName },
+      {
+        Email: email,
+        ExpiresAt: formatInstant(expiresAt),
+        ExpiryMinutes: SIGNUP_TTL_MINUTES,
+        Otp: otp,
+        PlanName: plan.name,
+        RequestIp: ip,
+        VerifyUrl: appUrl(`/verification?email=${encodeURIComponent(email)}`),
+      },
+    );
+    if (undelivered(sent)) {
+      // Don't leave a pending signup nobody can complete sitting on the address.
+      await discardSignup(email);
+      logger.error("signup.mail_failed", { email, ip });
+      sendError(res, 503, "PROVIDER_UNAVAILABLE", "Could not send the verification email. Please try again.");
+      return;
+    }
+    if (sent.skipped) logOtpForDevelopment(email, otp);
+
+    logger.info("signup.started", { email, ip, planId, organizationName });
+    res.status(202).json({ pending: true, email, expiresInMinutes: SIGNUP_TTL_MINUTES });
+  }),
+);
+
+const verificationSchema = z.object({
+  email: z.string().email(),
+  otp: z.string().regex(/^\d{6}$/, "Enter the 6-digit code from your email"),
+});
+
+/**
+ * Redeems a code. This is the only place a self-serve organisation is created, and
+ * it signs the new owner straight in — sending someone who has just proved they own
+ * the mailbox back to a login form is friction with no security value.
+ */
+openApiRouter.post(
+  "/verification",
+  handler(async (req, res) => {
+    if (env.SELF_SIGNUP_ENABLED !== "true") {
+      sendError(res, 403, "FORBIDDEN", "Self-service signup is closed.");
+      return;
+    }
+
+    const parsed = verificationSchema.safeParse(req.body);
+    if (!parsed.success) {
+      sendError(res, 400, "INVALID_ARGS", parsed.error.issues[0]?.message ?? "Invalid verification");
+      return;
+    }
+
+    const ip = req.ip ?? "unknown";
+    const { email, otp } = parsed.data;
+
+    if (!(await loginAllowed("signup", ip, email))) {
+      logger.warn("signup.verify.throttled", { email, ip });
+      sendError(res, 429, "RATE_LIMITED", "Too many attempts. Try again later.");
+      return;
+    }
+
+    const check = await checkOtp(email, otp);
+    if (!check.ok) {
+      await recordLoginFailure("signup", ip, email);
+      logger.warn("signup.verify.failed", { email, ip, reason: check.reason });
+      if (check.reason === "locked") {
+        sendError(res, 429, "RATE_LIMITED", "Too many wrong codes. Start the signup again.");
+        return;
+      }
+      if (check.reason === "expired") {
+        sendError(res, 401, "UNAUTHORIZED", "That code has expired. Start the signup again.");
+        return;
+      }
+      sendError(res, 401, "UNAUTHORIZED", `That code is not right. ${MAX_OTP_ATTEMPTS} tries are allowed per code.`);
+      return;
+    }
+
+    const pending = check.pending;
+
+    // Both of these were true when the form was submitted and are re-checked because
+    // fifteen minutes is long enough for either to change.
+    if (await getTenantUserByEmail(pending.email)) {
+      await discardSignup(pending.email);
+      sendError(res, 409, "CONFLICT", "An account already exists for this email. Sign in instead.");
+      return;
+    }
+    const plan = await getStoredPlan(pending.planId);
+    if (!plan || plan.hidden) {
+      await discardSignup(pending.email);
+      sendError(res, 409, "CONFLICT", "That plan is no longer available. Start the signup again.");
+      return;
+    }
+
+    let provisioned, session;
+    try {
+      provisioned = await provisionTenant({
+        organizationName: pending.organizationName,
+        plan,
+        owner: { email: pending.email, name: pending.name, passwordHash: pending.passwordHash },
+      });
+      session = await createSession(
+        provisioned.user.id,
+        provisioned.user.tenantId,
+        provisioned.user.role,
+        sessionContext(req),
+      );
+    } catch (err) {
+      logger.error("signup.provision_failed", {
+        email: pending.email,
+        err: err instanceof Error ? err.message : String(err),
+      });
+      sendError(res, 503, "PROVIDER_UNAVAILABLE", "Could not finish creating your workspace. Please try again.");
+      return;
+    }
+
+    // Only now is the code spent. Discarding it before provisioning would strand
+    // anyone whose org creation failed with no way back in.
+    await discardSignup(pending.email);
+    await clearLoginFailures("signup", ip, pending.email);
+
+    const { tenant, user, apiKey } = provisioned;
+    setSessionCookie(req, res, session.token, session.ttl);
+
+    await recordAuditEvent({
+      action: "tenant.self_registered",
+      actor: user.id,
+      actorLabel: personLabel(user),
+      target: tenant.tenantId,
+      targetLabel: pending.organizationName,
+      metadata: { planId: plan.id, planName: plan.name, ip },
+    });
+
+    // Best-effort: the workspace exists either way, and a missing welcome email is
+    // not a reason to fail a signup that has already succeeded.
+    const limits = plan.entitlements.limits;
+    void sendWelcomeEmail(
+      { to: user.email, firstName: firstNameOf(user.name), tenantName: pending.organizationName },
+      {
+        ApiBaseUrl: env.API_BASE_URL,
+        DataRetentionDays: limits.dataRetentionDays,
+        DocumentsIncluded: limits.documentsPerPeriod ?? "Unlimited",
+        PlanName: plan.name,
+        RateLimitPerMinute: limits.rateLimitPerMinute ?? "Unlimited",
+      },
+    ).catch(() => undefined);
+
+    logger.info("signup.completed", { email: user.email, tenantId: tenant.tenantId, planId: plan.id, ip });
+
+    // The raw key rides along on this one response and is never recoverable again —
+    // same contract as the admin console's tenant-creation endpoint.
+    res.status(201).json({ user: publicUser(user), tenantId: user.tenantId, role: user.role, apiKey });
+  }),
+);
+
+const resendSchema = z.object({ email: z.string().email() });
+
+/** A fresh code for a signup already in flight. Cooldown-limited in the store. */
+openApiRouter.post(
+  "/verification/resend",
+  handler(async (req, res) => {
+    const parsed = resendSchema.safeParse(req.body);
+    if (!parsed.success) {
+      sendError(res, 400, "INVALID_ARGS", "A valid email is required");
+      return;
+    }
+
+    const ip = req.ip ?? "unknown";
+    const email = parsed.data.email;
+
+    if (!(await loginAllowed("signup", ip, email))) {
+      sendError(res, 429, "RATE_LIMITED", "Too many attempts. Try again later.");
+      return;
+    }
+    await recordLoginFailure("signup", ip, email);
+
+    const result = await resendOtp(email);
+    if (!result.ok) {
+      if (result.reason === "cooldown") {
+        res.setHeader("Retry-After", String(result.retryAfterSeconds ?? RESEND_COOLDOWN_SECONDS));
+        sendError(
+          res,
+          429,
+          "RATE_LIMITED",
+          `Wait ${result.retryAfterSeconds ?? RESEND_COOLDOWN_SECONDS}s before asking for another code.`,
+        );
+        return;
+      }
+      // No pending signup — same shape as success, for the same non-enumeration
+      // reason as `/api/register`.
+      res.status(202).json({ pending: true, email, expiresInMinutes: SIGNUP_TTL_MINUTES });
+      return;
+    }
+
+    const plan = await getStoredPlan(result.pending.planId);
+    const sent = await sendVerifyEmail(
+      { to: email, firstName: firstNameOf(result.pending.name), tenantName: result.pending.organizationName },
+      {
+        Email: email,
+        ExpiresAt: formatInstant(result.expiresAt),
+        ExpiryMinutes: SIGNUP_TTL_MINUTES,
+        Otp: result.otp,
+        PlanName: plan?.name ?? result.pending.planId,
+        RequestIp: ip,
+        VerifyUrl: appUrl(`/verification?email=${encodeURIComponent(email)}`),
+      },
+    );
+    if (undelivered(sent)) {
+      sendError(res, 503, "PROVIDER_UNAVAILABLE", "Could not send the verification email. Please try again.");
+      return;
+    }
+    if (sent.skipped) logOtpForDevelopment(email, result.otp);
+
+    res.status(202).json({ pending: true, email, expiresInMinutes: SIGNUP_TTL_MINUTES });
   }),
 );
 

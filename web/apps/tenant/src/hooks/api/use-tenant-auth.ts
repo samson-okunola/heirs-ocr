@@ -9,6 +9,40 @@ export interface TenantLoginPayload {
   password: string;
 }
 
+export interface TenantRegisterPayload {
+  email: string;
+  password: string;
+  name: string;
+  organizationName: string;
+  planId: string;
+}
+
+export interface TenantVerificationPayload {
+  email: string;
+  otp: string;
+}
+
+/**
+ * `POST /api/tenant/register` deliberately does **not** return a session: nothing
+ * exists yet. The workspace is created only when the code comes back, so the only
+ * thing to do with this response is move the person to the verification step.
+ *
+ * It looks identical whether or not the email already has an account — the backend
+ * will not confirm which, and neither should anything built on top of it.
+ */
+export interface TenantSignupPending {
+  pending: true;
+  email: string;
+  expiresInMinutes: number;
+}
+
+/**
+ * Verification both creates the workspace and signs the new owner in, and carries
+ * the org's first API key. That key is shown once and is never recoverable, so
+ * whatever renders this must put it in front of the user immediately.
+ */
+export type TenantSignupResult = TenantSession & { apiKey: string };
+
 /**
  * A password POST either signs the user in or stops at the second factor. The
  * union is deliberate: nothing may treat the MFA branch as a session, because on
@@ -40,13 +74,42 @@ export function useTenantMe() {
   });
 }
 
+export function useTenantRegister() {
+  return useMutation({
+    mutationKey: ["tenant-auth", "register"],
+    mutationFn: (payload: TenantRegisterPayload) =>
+      http.post<TenantSignupPending>("/api/register", payload).then(unwrap),
+  });
+}
+
+export function useTenantVerification() {
+  const qc = useQueryClient();
+
+  return useMutation({
+    mutationKey: ["tenant-auth", "verification"],
+    mutationFn: (payload: TenantVerificationPayload) =>
+      http.post<TenantSignupResult>("/api/verification", payload).then(unwrap),
+    // The response *is* a session — the cookie came back on it. Seeding the cache
+    // means the dashboard doesn't flash an unauthenticated frame before `me` lands.
+    onSuccess: ({ user, tenantId, role }) => qc.setQueryData(ME_KEY, { user, tenantId, role }),
+  });
+}
+
+/** Asks for another code for a signup already in flight. Cooldown-limited server-side. */
+export function useTenantResendVerification() {
+  return useMutation({
+    mutationKey: ["tenant-auth", "verification-resend"],
+    mutationFn: (payload: { email: string }) =>
+      http.post<TenantSignupPending>("/api/verification/resend", payload).then(unwrap),
+  });
+}
+
 export function useTenantLogin() {
   const qc = useQueryClient();
 
   return useMutation({
     mutationKey: ["tenant-auth", "login"],
-    mutationFn: (payload: TenantLoginPayload) =>
-      http.post<TenantLoginResult>("/api/tenant/login", payload).then(unwrap),
+    mutationFn: (payload: TenantLoginPayload) => http.post<TenantLoginResult>("/api/login", payload).then(unwrap),
     // Only seed the session cache on the branch that actually established one.
     onSuccess: (result) => {
       if (!("mfaRequired" in result)) qc.setQueryData(ME_KEY, result);
@@ -60,7 +123,7 @@ export function useTenantLoginMfa() {
 
   return useMutation({
     mutationKey: ["tenant-auth", "login-mfa"],
-    mutationFn: (payload: TenantMfaPayload) => http.post<TenantSession>("/api/tenant/login/mfa", payload).then(unwrap),
+    mutationFn: (payload: TenantMfaPayload) => http.post<TenantSession>("/api/login/mfa", payload).then(unwrap),
     onSuccess: (session) => qc.setQueryData(ME_KEY, session),
   });
 }
@@ -70,7 +133,7 @@ export function useTenantLogout() {
 
   return useMutation({
     mutationKey: ["tenant-auth", "logout"],
-    mutationFn: () => http.post("/api/tenant/logout", {}).then(unwrap),
+    mutationFn: () => http.post("/api/logout", {}).then(unwrap),
     onSuccess: () => {
       // Drop every cached response, not just the session. The cache holds this org's
       // documents, keys, team and billing; leaving it in place means whoever signs in

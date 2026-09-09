@@ -1,153 +1,213 @@
 "use client";
 
+import {
+  type ArgErrors,
+  type ArgValues,
+  type Control,
+  type ObjectSchema,
+  type SchemaProp,
+  asObjectSchema,
+  controlFor,
+  toText,
+} from "../../lib/schema-args";
+import { capitalize, fromCamelCase } from "../../lib/string";
+import { Textarea } from "../ui/textarea";
 import { Input } from "../ui/input";
 import { Switch } from "../ui/switch";
 import { cn } from "../../lib/utils";
+import { Field } from "./field";
 
-/** Minimal view of the JSON Schema (draft 2020-12) the OCR catalog emits per function. */
-interface SchemaProp {
-  type?: string | string[];
-  description?: string;
-  default?: unknown;
-  enum?: unknown[];
-  minimum?: number;
-  maximum?: number;
-  minLength?: number;
-  maxLength?: number;
-}
+export type { ArgErrors, ArgValues } from "../../lib/schema-args";
+export { buildArgs, defaultArgs, hasArgsForm, hasNoArgs } from "../../lib/schema-args";
 
-interface ObjectSchema {
-  type?: string;
-  properties?: Record<string, SchemaProp>;
-  required?: string[];
-}
+// ── Rendering ─────────────────────────────────────────────────────────────────
 
-export type ArgValues = Record<string, unknown>;
+const labelFor = (key: string): string => capitalize(fromCamelCase(key));
 
-const asObjectSchema = (schema: unknown): ObjectSchema | null => {
-  if (!schema || typeof schema !== "object") return null;
-  const s = schema as ObjectSchema;
-  if (s.type !== "object" || !s.properties) return null;
-  return s;
-};
-
-const propType = (prop: SchemaProp): string | undefined =>
-  Array.isArray(prop.type) ? prop.type.find((t) => t !== "null") : prop.type;
-
-const isRenderable = (prop: SchemaProp): boolean => {
-  if (prop.enum) return true;
-  const t = propType(prop);
-  return t === "string" || t === "number" || t === "integer" || t === "boolean";
-};
-
-/** True when every field of the schema maps to a primitive control we can render. */
-export const hasArgsForm = (schema: unknown): boolean => {
-  const s = asObjectSchema(schema);
-  if (!s) return false;
-  const props = Object.values(s.properties ?? {});
-  return props.length > 0 && props.every(isRenderable);
-};
-
-/** Seeds form state from the schema's declared defaults. */
-export const defaultArgs = (schema: unknown): ArgValues => {
-  const s = asObjectSchema(schema);
-  if (!s) return {};
-  const out: ArgValues = {};
-  for (const [key, prop] of Object.entries(s.properties ?? {})) {
-    if (prop.default !== undefined) out[key] = prop.default;
+/**
+ * How to type this control, in the words of someone who has never seen JSON. Sits
+ * after the schema's own `description`, which says *what* the field does.
+ */
+const syntaxHint = (control: Control, prop: SchemaProp): string | undefined => {
+  switch (control.kind) {
+    case "list":
+      return "Separate each entry with a comma.";
+    case "numbers":
+      return control.count === 2
+        ? "Two numbers separated by a comma — the first and the last, e.g. 1, 5."
+        : "Numbers separated by commas.";
+    case "pairs":
+      return 'One rename per comma, written as "original: your name".';
+    case "specs":
+      return `One field per comma, written as "Field name: type". Types: ${control.types.join(", ")}. Add * to mark a field as required.`;
+    default:
+      return prop.minimum !== undefined && prop.maximum !== undefined
+        ? `Between ${prop.minimum} and ${prop.maximum}.`
+        : undefined;
   }
-  return out;
 };
 
-/** Drops empty/undefined entries so omitted fields fall back to backend defaults. */
-export const cleanArgs = (values: ArgValues): ArgValues => {
-  const out: ArgValues = {};
-  for (const [key, value] of Object.entries(values)) {
-    if (value === undefined || value === "") continue;
-    out[key] = value;
+/** An example line — from the schema when it offers one, invented when it doesn't. */
+const placeholderFor = (control: Control, prop: SchemaProp): string | undefined => {
+  const example = prop.examples?.[0];
+  if (example !== undefined) return toText(control, example);
+  if (prop.default !== undefined && control.kind !== "switch") return toText(control, prop.default);
+  switch (control.kind) {
+    case "list":
+      return "first entry, second entry";
+    case "numbers":
+      return control.count === 2 ? "1, 5" : "1, 2, 3";
+    case "pairs":
+      return "original: your name";
+    case "specs":
+      return "Invoice number: string, Total: number*";
+    default:
+      return undefined;
   }
-  return out;
 };
+
+const isMultiline = (control: Control): boolean =>
+  control.kind === "list" || control.kind === "pairs" || control.kind === "specs";
 
 interface SchemaFormProps {
   schema: unknown;
   values: ArgValues;
   onChange: (values: ArgValues) => void;
+  /** Per-field messages from {@link buildArgs}, keyed by the same dotted paths. */
+  errors?: ArgErrors;
 }
 
-export const SchemaForm = ({ schema, values, onChange }: SchemaFormProps) => {
-  const s = asObjectSchema(schema);
-  if (!s) return null;
+export const SchemaForm = ({ schema, values, onChange, errors = {} }: SchemaFormProps) => {
+  const resolved = asObjectSchema(schema);
+  if (!resolved) return null;
+  return <Group schema={resolved} values={values} onChange={onChange} errors={errors} prefix="" />;
+};
 
-  const required = new Set(s.required ?? []);
+const Group = ({
+  schema,
+  values,
+  onChange,
+  errors,
+  prefix,
+}: {
+  schema: ObjectSchema;
+  values: ArgValues;
+  onChange: (values: ArgValues) => void;
+  errors: ArgErrors;
+  prefix: string;
+}) => {
+  const required = new Set(schema.required ?? []);
   const set = (key: string, value: unknown) => onChange({ ...values, [key]: value });
 
   return (
     <div className="space-y-3">
-      {Object.entries(s.properties ?? {}).map(([key, prop]) => {
-        const t = propType(prop);
-        const label = (
-          <label className="text-sm font-medium">
-            {key}
-            {required.has(key) && <span className="text-destructive"> *</span>}
-          </label>
-        );
-        const hint = prop.description ? <p className="text-xs text-muted-foreground">{prop.description}</p> : null;
+      {Object.entries(schema.properties ?? {}).map(([key, prop]) => {
+        const control = controlFor(prop);
+        if (!control) return null;
 
-        if (prop.enum) {
+        const path = prefix ? `${prefix}.${key}` : key;
+        const label = labelFor(key);
+        const error = errors[path];
+        // A field carrying a default is never really required of the person filling
+        // the form in, whatever the published schema says.
+        const mustFill = required.has(key) && prop.default === undefined;
+        const hint = [prop.description, syntaxHint(control, prop)].filter(Boolean).join(" ") || undefined;
+
+        if (control.kind === "group") {
           return (
-            <div key={key} className="space-y-1.5">
-              {label}
-              <select
-                value={String(values[key] ?? "")}
-                onChange={(e) => set(key, e.target.value)}
-                className={cn(
-                  "h-8 w-full rounded-md border border-input bg-transparent px-2.5 text-sm outline-none",
-                  "focus-visible:border-ring",
-                )}
-              >
-                {prop.enum.map((opt) => (
-                  <option key={String(opt)} value={String(opt)}>
-                    {String(opt)}
-                  </option>
-                ))}
-              </select>
-              {hint}
+            <div key={key} className="border-border space-y-3 rounded-md border border-dashed p-3">
+              <div className="space-y-0.5">
+                <p className="text-sm font-medium">{label}</p>
+                {prop.description && <p className="text-muted-foreground text-xs text-pretty">{prop.description}</p>}
+              </div>
+              <Group
+                schema={{ type: "object", properties: control.properties, required: control.required }}
+                values={(values[key] as ArgValues) ?? {}}
+                onChange={(nested) => set(key, nested)}
+                errors={errors}
+                prefix={path}
+              />
             </div>
           );
         }
 
-        if (t === "boolean") {
+        if (control.kind === "switch") {
           return (
-            <div key={key} className="flex items-center justify-between gap-4">
+            <div key={key} className="flex items-start justify-between gap-4">
               <div className="space-y-0.5">
-                {label}
-                {hint}
+                <span className="text-sm font-medium">{label}</span>
+                {hint && <p className="text-muted-foreground text-xs text-pretty">{hint}</p>}
               </div>
               <Switch checked={Boolean(values[key])} onCheckedChange={(checked) => set(key, checked)} />
             </div>
           );
         }
 
-        const numeric = t === "number" || t === "integer";
-        return (
-          <div key={key} className="space-y-1.5">
-            {label}
-            <Input
-              type={numeric ? "number" : "text"}
-              value={values[key] === undefined ? "" : String(values[key])}
-              min={prop.minimum}
-              max={prop.maximum}
-              step={t === "integer" ? 1 : "any"}
-              maxLength={numeric ? undefined : prop.maxLength}
-              onChange={(e) => {
-                const raw = e.target.value;
-                if (raw === "") return set(key, undefined);
-                set(key, numeric ? Number(raw) : raw);
-              }}
+        if (control.kind === "enum") {
+          return (
+            <Field
+              key={key}
+              label={label}
+              hint={hint}
+              error={error}
+              required={mustFill}
+              renderControl={(id) => (
+                <select
+                  id={id}
+                  value={String(values[key] ?? "")}
+                  onChange={(e) => set(key, e.target.value)}
+                  className={cn(
+                    "border-input h-8 w-full rounded-md border bg-transparent px-2.5 text-sm outline-none",
+                    "focus-visible:border-ring",
+                  )}
+                >
+                  {control.options.map((opt) => (
+                    <option key={opt} value={opt}>
+                      {opt}
+                    </option>
+                  ))}
+                </select>
+              )}
             />
-            {hint}
-          </div>
+          );
+        }
+
+        const text = values[key] === undefined ? "" : String(values[key]);
+        const placeholder = placeholderFor(control, prop);
+
+        return (
+          <Field
+            key={key}
+            label={label}
+            hint={hint}
+            error={error}
+            required={mustFill}
+            renderControl={(id) =>
+              isMultiline(control) ? (
+                <Textarea
+                  id={id}
+                  value={text}
+                  rows={2}
+                  spellCheck={false}
+                  placeholder={placeholder}
+                  onChange={(e) => set(key, e.target.value)}
+                  className="text-sm"
+                />
+              ) : (
+                <Input
+                  id={id}
+                  type={control.kind === "number" ? "number" : "text"}
+                  value={text}
+                  min={prop.minimum}
+                  max={prop.maximum}
+                  step={control.kind === "number" && control.integer ? 1 : "any"}
+                  maxLength={control.kind === "text" ? prop.maxLength : undefined}
+                  placeholder={placeholder}
+                  onChange={(e) => set(key, e.target.value)}
+                />
+              )
+            }
+          />
         );
       })}
     </div>

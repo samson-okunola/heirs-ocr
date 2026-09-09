@@ -1,3 +1,4 @@
+import Link from "next/link";
 import {
   ScanText,
   FileText,
@@ -10,9 +11,10 @@ import {
   FileSearch,
   Check,
 } from "lucide-react";
-import Link from "next/link";
 
 import { Button, Badge } from "@heirs/ui";
+import { isFeaturedPlan, planFeatures, planPrice } from "@/lib/plans";
+import { fetchPublicPlans } from "@/lib/ocr";
 
 const functions = [
   { icon: ScanText, label: "Text Extraction", desc: "Canonical markdown from any file type" },
@@ -41,51 +43,6 @@ const pillars = [
   },
 ];
 
-const plans = [
-  {
-    name: "Free Trial",
-    price: "₦0",
-    sub: "14 days",
-    desc: "Explore all standard functions with no commitment.",
-    cta: "Start free trial",
-    featured: false,
-    features: ["50 documents included", "Standard functions only", "5 pages per document", "Community support"],
-  },
-  {
-    name: "Pay As You Go",
-    price: "₦150",
-    sub: "/ document",
-    desc: "No monthly fee. Pay only for what you process.",
-    cta: "Get started",
-    featured: false,
-    features: ["All standard functions", "No monthly minimum", "Up to 30 pages / doc", "Email support"],
-  },
-  {
-    name: "Starter",
-    price: "₦25,000",
-    sub: "/ month",
-    desc: "For teams with predictable monthly volume.",
-    cta: "Get started",
-    featured: true,
-    features: ["500 documents / month", "All standard functions", "Async job queue", "Webhooks", "Priority processing"],
-  },
-  {
-    name: "Business",
-    price: "₦75,000",
-    sub: "/ month",
-    desc: "PII functions, higher limits, and SLA support.",
-    cta: "Get started",
-    featured: false,
-    features: [
-      "2,000 documents / month",
-      "PII functions (ID, Loan, Bank)",
-      "Extended data retention",
-      "Custom form schemas",
-      "SLA support",
-    ],
-  },
-];
-
 const snippet = `POST /v1/ocr/RECEIPT_PARSING
 Authorization: Bearer hok_live_<key>
 Content-Type: multipart/form-data
@@ -104,7 +61,12 @@ Content-Type: multipart/form-data
   }
 }`;
 
-export default function Page() {
+export default async function Page() {
+  // Prices are catalog data — an operator edits a plan in the admin console and
+  // this page follows, with no deploy. Empty when the API is unreachable; the
+  // section below then says so rather than showing numbers nobody stands behind.
+  const plans = await fetchPublicPlans();
+
   return (
     <div className="overflow-y-auto">
       <section className="relative overflow-hidden border-b bg-linear-to-b from-background to-muted/30">
@@ -125,7 +87,7 @@ export default function Page() {
             <Button
               size="lg"
               render={
-                <Link href="/login">
+                <Link href="/register">
                   Get started <ArrowRight className="size-4" />
                 </Link>
               }
@@ -223,44 +185,67 @@ export default function Page() {
             <h2 className="mt-2 text-3xl font-bold tracking-tight">Simple, transparent pricing</h2>
             <p className="mt-3 text-muted-foreground">Start free. Scale as you grow. All prices in NGN.</p>
           </div>
-          <div className="mt-12 grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
-            {plans.map((plan) => (
-              <div
-                key={plan.name}
-                className={`relative flex flex-col rounded-xl border bg-card p-6 ${
-                  plan.featured ? "border-primary ring-1 ring-primary" : ""
-                }`}
-              >
-                {plan.featured && (
-                  <span className="absolute -top-3 left-1/2 -translate-x-1/2 rounded-full bg-primary px-3 py-0.5 text-xs font-semibold text-primary-foreground">
-                    Most popular
-                  </span>
-                )}
-                <p className="text-sm font-semibold">{plan.name}</p>
-                <div className="mt-3 flex items-end gap-1">
-                  <span className="text-3xl font-bold tracking-tight">{plan.price}</span>
-                  {plan.sub && <span className="mb-1 text-xs text-muted-foreground">{plan.sub}</span>}
-                </div>
-                <p className="mt-2 text-xs text-muted-foreground">{plan.desc}</p>
-                <ul className="mt-5 flex flex-1 flex-col gap-2">
-                  {plan.features.map((f) => (
-                    <li key={f} className="flex items-start gap-2 text-xs text-muted-foreground">
-                      <span className="mt-0.5 grid size-4 shrink-0 place-items-center rounded-full bg-primary/15 text-[9px] font-bold text-primary">
-                        <Check className="size-3" />
+          {plans.length === 0 ? (
+            <div className="mx-auto mt-12 max-w-md rounded-xl border bg-card p-6 text-center">
+              <p className="text-sm font-semibold">Pricing is on its way</p>
+              <p className="mt-2 text-xs text-muted-foreground text-pretty">
+                We couldn&rsquo;t load the current plans just now. Start a free trial and the options are shown as you
+                sign up, or ask us and we&rsquo;ll send them over.
+              </p>
+              <Button size="sm" className="mt-5 w-full" render={<Link href="/register">Start free trial</Link>} />
+            </div>
+          ) : (
+            <div
+              className={`mt-12 grid gap-6 sm:grid-cols-2 ${plans.length >= 4 ? "lg:grid-cols-4" : "lg:grid-cols-3"}`}
+            >
+              {plans.map((plan) => {
+                const price = planPrice(plan);
+                const featured = isFeaturedPlan(plan);
+                return (
+                  <div
+                    key={plan.id}
+                    className={`relative flex flex-col rounded-xl border bg-card p-6 ${
+                      featured ? "border-primary ring-1 ring-primary" : ""
+                    }`}
+                  >
+                    {featured && (
+                      <span className="absolute -top-3 left-1/2 -translate-x-1/2 rounded-full bg-primary px-3 py-0.5 text-xs font-semibold text-primary-foreground">
+                        Most popular
                       </span>
-                      {f}
-                    </li>
-                  ))}
-                </ul>
-                <Button
-                  size="sm"
-                  variant={plan.featured ? "default" : "outline"}
-                  className="mt-6 w-full"
-                  render={<Link href="/login">{plan.cta}</Link>}
-                />
-              </div>
-            ))}
-          </div>
+                    )}
+                    <p className="text-sm font-semibold">{plan.name}</p>
+                    <div className="mt-3 flex items-end gap-1">
+                      <span className="text-3xl font-bold tracking-tight">{price.amount}</span>
+                      {price.period && <span className="mb-1 text-xs text-muted-foreground">{price.period}</span>}
+                    </div>
+                    {plan.description && <p className="mt-2 text-xs text-muted-foreground">{plan.description}</p>}
+                    <ul className="mt-5 flex flex-1 flex-col gap-2">
+                      {planFeatures(plan).map((f) => (
+                        <li key={f} className="flex items-start gap-2 text-xs text-muted-foreground">
+                          <span className="mt-0.5 grid size-4 shrink-0 place-items-center rounded-full bg-primary/15 text-[9px] font-bold text-primary">
+                            <Check className="size-3" />
+                          </span>
+                          {f}
+                        </li>
+                      ))}
+                    </ul>
+                    <Button
+                      size="sm"
+                      variant={featured ? "default" : "outline"}
+                      className="mt-6 w-full"
+                      // Carries the choice into the form, so picking a card here means
+                      // the plan is already selected when the page opens.
+                      render={
+                        <Link href={`/register?plan=${encodeURIComponent(plan.id)}`}>
+                          {plan.billing.kind === "trial" ? "Start free trial" : "Get started"}
+                        </Link>
+                      }
+                    />
+                  </div>
+                );
+              })}
+            </div>
+          )}
           <p className="mt-8 text-center text-xs text-muted-foreground">
             Need a custom volume deal?{" "}
             <Link

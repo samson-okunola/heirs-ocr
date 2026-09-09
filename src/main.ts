@@ -4,9 +4,9 @@ import path from "path";
 
 import { metricsAuth, securityHeaders } from "./http/middleware/security-headers";
 import { metricsContentType, renderMetrics } from "./observability/metrics";
+import { openApiRouter, tenantApiRouter } from "./http/tenant/routes";
 import { errorHandler, notFound } from "./http/middleware/error";
 import { checkDependencies } from "./observability/health";
-import { tenantApiRouter } from "./http/tenant/routes";
 import { adminApiRouter } from "./http/admin/routes";
 import { corsMiddleware } from "./config/cors";
 import { ocrRouter } from "./http/routes";
@@ -50,6 +50,7 @@ export function main() {
   });
 
   app.use("/v1/ocr", ocrRouter);
+  app.use("/api", openApiRouter);
 
   // Admin console: static assets + JSON API, both under /admin. Same-origin (no
   // CORS). Login is open; other /admin/api routes gate on session + role. The first

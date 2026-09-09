@@ -61,6 +61,9 @@ export const tenantKeys = {
   sessions: [...root, "security", "sessions"] as const,
   /** The org's sign-in IP restrictions. */
   ipAllowlist: [...root, "security", "ip-allowlist"] as const,
+
+  /** The self-serve plan catalog shown on the register form. */
+  planList: (params?: unknown) => [...root, "plans", params] as const,
 } as const;
 
 /**

@@ -2,9 +2,18 @@
 
 import { useEffect, useState } from "react";
 
-import { PageLayout, SchemaForm, cleanArgs, defaultArgs, hasArgsForm, type ArgValues } from "@/components/shared";
+import {
+  PageLayout,
+  SchemaForm,
+  buildArgs,
+  defaultArgs,
+  hasArgsForm,
+  hasNoArgs,
+  type ArgErrors,
+  type ArgValues,
+} from "@/components/shared";
 import { useInvalidateAfterOcrRun } from "@/hooks/api/use-tenant-documents";
-import { Field, ScrollArea, SelectOption, StatusBadge } from "@heirs/ui";
+import { Field, ScrollArea, SelectOption, Shimmer, StatusBadge } from "@heirs/ui";
 import { Textarea } from "@heirs/ui";
 import { Button } from "@heirs/ui";
 import { Input } from "@heirs/ui";
@@ -75,6 +84,44 @@ const Meta = ({ label, value }: { label: string; value: string | number }) => (
 const formatBytes = (bytes: number): string =>
   bytes >= 1024 * 1024 ? `${(bytes / (1024 * 1024)).toFixed(1)} MB` : `${Math.ceil(bytes / 1024)} KB`;
 
+/** Elapsed run time. Seconds alone stop being readable somewhere around a minute. */
+const formatElapsed = (seconds: number): string =>
+  seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s`;
+
+/**
+ * A stand-in shaped like the result that replaces it — the metadata row, then the
+ * JSON block. Matching the real layout means the panel settles into the answer
+ * rather than jumping when it lands.
+ *
+ * The line widths are fixed rather than random so the placeholder is stable across
+ * re-renders; a skeleton that reshuffles every second reads as activity that isn't
+ * happening.
+ */
+const RunSkeleton = () => (
+  <>
+    <div className="border-hairline flex flex-wrap gap-x-6 gap-y-2 rounded-md border px-3 py-2.5">
+      {["w-14", "w-8", "w-16", "w-12"].map((width) => (
+        <div key={width} className="flex flex-col gap-1.5">
+          <Shimmer className="h-2 w-12" />
+          <Shimmer className={`h-3 ${width}`} />
+        </div>
+      ))}
+    </div>
+    <div className="border-hairline bg-muted/40 space-y-2 rounded-md border p-3">
+      {["w-24", "w-3/5", "w-4/5", "w-2/5", "w-3/4", "w-1/2", "w-2/3", "w-16"].map((width, i) => (
+        <Shimmer key={i} className={`h-2.5 ${width}`} />
+      ))}
+    </div>
+  </>
+);
+
+/** Quiet link-style switch between the guided form and the raw JSON editor. */
+const ModeToggle = ({ onClick, children }: { onClick: () => void; children: string }) => (
+  <button type="button" onClick={onClick} className="text-muted-foreground hover:text-foreground text-xs underline">
+    {children}
+  </button>
+);
+
 const Page = () => {
   // Refreshes Documents / Reports / Billing once a run settles. Stable across
   // renders, so the polling effect below can depend on it without re-subscribing.
@@ -83,15 +130,24 @@ const Page = () => {
   const [result, setResult] = useState<RunResult | null>(null);
   const [catalogLoading, setCatalogLoading] = useState(true);
   const [argValues, setArgValues] = useState<ArgValues>({});
+  const [argErrors, setArgErrors] = useState<ArgErrors>({});
   const [error, setError] = useState<string | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [selectedKey, setSelectedKey] = useState("");
   const [argsText, setArgsText] = useState("{}");
+  // Escape hatch: raw JSON, for the one shape the form deliberately does not draw
+  // (FORM_DATA_EXTRACTION's raw JSON Schema branch) and for anyone who prefers it.
+  const [jsonMode, setJsonMode] = useState(false);
   const [running, setRunning] = useState(false);
 
   // Set when the backend queues the document (202) instead of processing inline.
   const [jobStatus, setJobStatus] = useState<OcrJobStatus | null>(null);
   const [jobId, setJobId] = useState<string | null>(null);
+
+  // Seconds since the run started. Extraction plus a model call can take half a
+  // minute on a scanned multi-page document, and a spinner that never changes is
+  // exactly when someone reloads the page and pays for the work twice.
+  const [elapsed, setElapsed] = useState(0);
 
   // Load the live function catalog via the same-origin proxy.
   useEffect(() => {
@@ -183,9 +239,22 @@ const Page = () => {
     };
   }, [jobId, refreshAfterRun]);
 
-  const selected = functions.find((f) => f.key === selectedKey);
-  const schemaMode = selected ? hasArgsForm(selected.argsSchema) : false;
   const busy = running || jobId !== null;
+
+  // One timer spanning the whole run. `busy` stays true across the hand-off from an
+  // inline request to a queued job, so the count is of the run, not of a phase.
+  useEffect(() => {
+    if (!busy) return;
+    const startedAt = Date.now();
+    // setElapsed(0);
+    const tick = setInterval(() => setElapsed(Math.floor((Date.now() - startedAt) / 1000)), 1_000);
+    return () => clearInterval(tick);
+  }, [busy]);
+
+  const selected = functions.find((f) => f.key === selectedKey);
+  const formAvailable = selected ? hasArgsForm(selected.argsSchema) : false;
+  const noArgs = selected ? hasNoArgs(selected.argsSchema) : false;
+  const schemaMode = formAvailable && !jsonMode;
 
   const acceptAttr = selected?.accepts
     .map((group) => ACCEPT_ATTR[group])
@@ -198,7 +267,11 @@ const Page = () => {
   if (argsForKey !== selectedKey) {
     setArgsForKey(selectedKey);
     setArgValues(selected ? defaultArgs(selected.argsSchema) : {});
+    setArgErrors({});
     setArgsText("{}");
+    // The JSON editor is opt-in per function: one that has a form should open with
+    // the form, even if the last function was driven from JSON.
+    setJsonMode(false);
     setError(null);
     setResult(null); // a result belongs to the function that produced it
   }
@@ -222,10 +295,18 @@ const Page = () => {
       return;
     }
 
-    // In schema mode the form guarantees valid args; otherwise validate the raw JSON.
+    // The comma-separated lines are parsed here, so a mistyped page range or field
+    // list is reported against the field that carries it rather than coming back as
+    // an opaque 400 from the API.
     let argsPayload: string;
     if (schemaMode) {
-      argsPayload = JSON.stringify(cleanArgs(argValues));
+      const { args, errors } = buildArgs(selected?.argsSchema, argValues);
+      setArgErrors(errors);
+      if (Object.keys(errors).length > 0) {
+        setError("Check the highlighted options below.");
+        return;
+      }
+      argsPayload = JSON.stringify(args);
     } else {
       try {
         argsPayload = JSON.stringify(JSON.parse(argsText || "{}"));
@@ -316,25 +397,42 @@ const Page = () => {
             )}
             hint={file ? `${file.name} · ${formatBytes(file.size)}` : undefined}
           />
-          {schemaMode ? (
-            <Field label="Args" hint="Function-specific options; defaults apply when a field is left empty.">
-              <SchemaForm schema={selected?.argsSchema} values={argValues} onChange={setArgValues} />
-            </Field>
-          ) : (
-            <Field
-              label="Args (JSON)"
-              hint="Optional. This function takes a dynamic schema; enter args as JSON."
-              renderControl={(id) => (
-                <Textarea
-                  id={id}
-                  value={argsText}
-                  onChange={(e) => setArgsText(e.target.value)}
-                  rows={5}
-                  spellCheck={false}
-                  className="font-mono text-xs"
+          {noArgs ? (
+            <p className="text-muted-foreground text-xs">This function has no options — just pick a document.</p>
+          ) : schemaMode ? (
+            <div className="space-y-3">
+              <Field label="Options" hint="All optional — leave one blank and the usual setting is used.">
+                <SchemaForm
+                  schema={selected?.argsSchema}
+                  values={argValues}
+                  onChange={setArgValues}
+                  errors={argErrors}
                 />
-              )}
-            />
+              </Field>
+              <ModeToggle onClick={() => setJsonMode(true)}>Enter options as JSON instead</ModeToggle>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <Field
+                label="Options (JSON)"
+                hint={
+                  formAvailable
+                    ? "Raw JSON, exactly as the API takes it."
+                    : "Optional. This function takes a dynamic schema; enter options as JSON."
+                }
+                renderControl={(id) => (
+                  <Textarea
+                    id={id}
+                    value={argsText}
+                    onChange={(e) => setArgsText(e.target.value)}
+                    rows={5}
+                    spellCheck={false}
+                    className="font-mono text-xs"
+                  />
+                )}
+              />
+              {formAvailable && <ModeToggle onClick={() => setJsonMode(false)}>Back to the guided form</ModeToggle>}
+            </div>
           )}
           <Button onClick={run} disabled={busy || !selectedKey} className="w-full sm:w-auto">
             {busy ? "Running…" : "Run document"}
@@ -346,18 +444,44 @@ const Page = () => {
               {error}
             </div>
           )}
-          {jobId && (
-            <div className="border-hairline space-y-2 rounded-md border px-3 py-3 text-sm">
-              <StatusBadge
-                tone="pending"
-                label={jobStatus === "active" ? "Processing" : "Queued"}
-                className="normal-case"
-              />
-              <p className="text-muted-foreground text-xs text-pretty">
-                This document was large enough to run in the background. It keeps going if you leave the page — job{" "}
-                <span className="text-foreground font-mono">{jobId}</span>.
-              </p>
-            </div>
+          {busy && !result && (
+            <>
+              {/* `role="status"` announces the state itself; the seconds counter is
+                  marked hidden so a screen reader isn't read a new number every tick. */}
+              <div role="status" aria-live="polite" className="border-hairline space-y-2 rounded-md border px-3 py-3">
+                <div className="flex items-center justify-between gap-3">
+                  <StatusBadge
+                    tone="pending"
+                    label={jobId && jobStatus !== "active" ? "Queued" : "Processing"}
+                    className="normal-case"
+                  />
+                  <span aria-hidden className="text-muted-foreground font-mono text-xs tabular-nums">
+                    {formatElapsed(elapsed)}
+                  </span>
+                </div>
+                <p className="text-muted-foreground text-xs text-pretty">
+                  {jobId ? (
+                    <>
+                      This document was large enough to run in the background. It keeps going if you leave the page —
+                      job <span className="text-foreground font-mono">{jobId}</span>.
+                    </>
+                  ) : (
+                    <>
+                      Running <span className="text-foreground">{selectedKey.replace(/_/g, " ").toLowerCase()}</span>
+                      {file ? (
+                        <>
+                          {" "}
+                          on <span className="text-foreground">{file.name}</span>
+                        </>
+                      ) : null}
+                      . Keep this page open — an inline run is tied to this request. Larger documents are queued
+                      instead, and those survive a reload.
+                    </>
+                  )}
+                </p>
+              </div>
+              <RunSkeleton />
+            </>
           )}
           {result && (
             <>
@@ -382,8 +506,8 @@ const Page = () => {
               </ScrollArea>
             </>
           )}
-          {!error && !result && !jobId && (
-            <p className="text-muted-foreground py-8 text-center text-sm">
+          {!error && !result && !busy && (
+            <p className="text-muted-foreground text-sm">
               Pick a function and a document, then run it. The structured result appears here.
             </p>
           )}

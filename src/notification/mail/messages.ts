@@ -270,6 +270,19 @@ export type WelcomeArgs = {
   RateLimitPerMinute: Num;
 };
 
+export type VerifyEmailArgs = {
+  Email: string;
+  /** Human-readable instant the code stops working, already formatted for the reader. */
+  ExpiresAt: string;
+  ExpiryMinutes: Num;
+  /** Single-use credential. Never log this value — see the note in `mailer.send`. */
+  Otp: string;
+  PlanName: string;
+  /** Where the signup was submitted from, so an unexpected mail can be judged. */
+  RequestIp: string;
+  VerifyUrl: string;
+};
+
 export type TeamInviteArgs = {
   Email: string;
   InviterName: string;
@@ -285,6 +298,9 @@ export const sendWelcomeEmail = (r: Recipient, a: WelcomeArgs) => dispatch("welc
 
 /** A user was added to a workspace and needs their first-sign-in credential. */
 export const sendTeamInviteEmail = (r: Recipient, a: TeamInviteArgs) => dispatch("team-invite", r, a);
+
+/** The code that turns a pending self-serve signup into a real workspace. */
+export const sendVerifyEmail = (r: Recipient, a: VerifyEmailArgs) => dispatch("verify-email", r, a);
 
 // --- trial ----------------------------------------------------------------
 
@@ -442,6 +458,7 @@ export type TemplateArgs = {
   "team-invite": TeamInviteArgs;
   "trial-end": TrialEndArgs;
   "trial-start": TrialStartArgs;
+  "verify-email": VerifyEmailArgs;
   "webhook-failing": WebhookFailingArgs;
   welcome: WelcomeArgs;
 };

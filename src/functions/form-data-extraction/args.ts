@@ -27,11 +27,11 @@ const boundsOf = (schema: Record<string, unknown>): SchemaBounds => {
 };
 
 export const fieldSpecSchema = z.object({
-  name: z.string().min(1),
-  type: z.enum(["string", "number", "boolean", "date"]),
-  description: z.string().optional(),
-  required: z.boolean().default(false),
-  enum: z.array(z.string()).optional(),
+  name: z.string().min(1).describe("What to call this field in the result."),
+  type: z.enum(["string", "number", "boolean", "date"]).describe("What kind of value to expect."),
+  description: z.string().optional().describe("A hint about where to find it, if the name alone is ambiguous."),
+  required: z.boolean().default(false).describe("Flag the result when this field is missing from the document."),
+  enum: z.array(z.string()).optional().describe("Restrict the answer to one of these values."),
 });
 
 export type FieldSpec = z.infer<typeof fieldSpecSchema>;
@@ -63,7 +63,13 @@ const jsonSchemaArgSchema = z.object({ jsonSchema: z.record(z.string(), z.unknow
 
 /** Either a structured field spec or a bounded raw JSON Schema — exactly one. */
 export const formDataExtractionArgsSchema = z.union([
-  z.object({ fields: z.array(fieldSpecSchema).min(1).max(MAX_FIELDS) }),
+  z.object({
+    fields: z
+      .array(fieldSpecSchema)
+      .min(1)
+      .max(MAX_FIELDS)
+      .describe("The fields to pull off the document. Name each one and say what kind of value it holds."),
+  }),
   jsonSchemaArgSchema,
 ]);
 

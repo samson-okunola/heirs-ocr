@@ -233,6 +233,15 @@ const SAMPLES: { [K in TemplateName]: TemplateArgs[K] } = {
     TrialDays: "7",
     TrialEndsAt: "12 August 2026, 14:03 WAT",
   },
+  "verify-email": {
+    Email: "recipient@example.test",
+    ExpiresAt: "12 August 2026, 14:03 WAT",
+    ExpiryMinutes: "15",
+    Otp: "042318",
+    PlanName: "PlanName value",
+    RequestIp: "203.0.113.7",
+    VerifyUrl: "https://example.test/verifyurl",
+  },
   "webhook-failing": {
     ConsecutiveFailures: "7",
     EndpointUrl: "https://example.test/endpointurl",

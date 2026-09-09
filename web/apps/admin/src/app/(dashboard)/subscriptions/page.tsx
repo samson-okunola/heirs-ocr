@@ -9,6 +9,7 @@ import { createSubscriptionColumns } from "@/config/columns/subscriptions";
 import { getErrorMessage } from "@heirs/api-client";
 import { usePagination } from "@heirs/ui";
 import { StatTile } from "@heirs/ui";
+import { formatMinorCurrency } from "@heirs/ui";
 
 /**
  * Live tenant enrolments. The plan *catalog* is managed separately under
@@ -20,7 +21,7 @@ import { StatTile } from "@heirs/ui";
  * legitimately be on different currencies — summing across them would be nonsense.
  * Totalled per currency and rendered as the dominant one, with the rest as a hint.
  */
-const money = (currency: string, minor: number): string => `${currency} ${(minor / 100).toLocaleString()}`;
+const money = (currency: string, minor: number): string => formatMinorCurrency(minor, currency);
 
 const Page = () => {
   const { params, tableProps } = usePagination();
